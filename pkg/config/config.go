@@ -210,8 +210,15 @@ type WebToolsConfig struct {
 	DuckDuckGo DuckDuckGoConfig `json:"duckduckgo"`
 }
 
+type ExecConfig struct {
+	DenyPatterns  []string `json:"deny_patterns"`  // Additional regex deny patterns
+	AllowPatterns []string `json:"allow_patterns"` // If set, only matching commands are allowed
+	MaxTimeout    int      `json:"max_timeout"`    // Seconds, default 60
+}
+
 type ToolsConfig struct {
-	Web WebToolsConfig `json:"web"`
+	Web  WebToolsConfig `json:"web"`
+	Exec ExecConfig     `json:"exec"`
 }
 
 func DefaultConfig() *Config {
@@ -320,6 +327,11 @@ func DefaultConfig() *Config {
 					Enabled:    true,
 					MaxResults: 5,
 				},
+			},
+			Exec: ExecConfig{
+				DenyPatterns:  []string{},
+				AllowPatterns: []string{},
+				MaxTimeout:    60,
 			},
 		},
 		Heartbeat: HeartbeatConfig{

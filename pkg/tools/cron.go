@@ -27,13 +27,14 @@ type CronTool struct {
 	mu          sync.RWMutex
 }
 
-// NewCronTool creates a new CronTool
-func NewCronTool(cronService *cron.CronService, executor JobExecutor, msgBus *bus.MessageBus, workspace string) *CronTool {
+// NewCronTool creates a new CronTool.
+// The restrict parameter controls whether cron commands are restricted to the workspace.
+func NewCronTool(cronService *cron.CronService, executor JobExecutor, msgBus *bus.MessageBus, workspace string, restrict bool) *CronTool {
 	return &CronTool{
 		cronService: cronService,
 		executor:    executor,
 		msgBus:      msgBus,
-		execTool:    NewExecTool(workspace, false),
+		execTool:    NewExecTool(workspace, restrict),
 	}
 }
 

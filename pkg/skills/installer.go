@@ -8,9 +8,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
+
+// repoNamePattern validates GitHub repository format: "owner/repo"
+var repoNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$`)
 
 type SkillInstaller struct {
 	workspace string
@@ -37,6 +41,11 @@ func NewSkillInstaller(workspace string) *SkillInstaller {
 }
 
 func (si *SkillInstaller) InstallFromGitHub(ctx context.Context, repo string) error {
+	// Validate repo format to prevent URL injection
+	if !repoNamePattern.MatchString(repo) {
+		return fmt.Errorf("invalid repository format: must be 'owner/repo' (got %q)", repo)
+	}
+
 	skillDir := filepath.Join(si.workspace, "skills", filepath.Base(repo))
 
 	if _, err := os.Stat(skillDir); err == nil {

@@ -13,6 +13,13 @@ import (
 	"time"
 )
 
+// ExecToolConfig holds configurable options for ExecTool.
+type ExecToolConfig struct {
+	DenyPatterns  []string // Additional regex deny patterns from config
+	AllowPatterns []string // If set, only matching commands are allowed
+	MaxTimeout    int      // Seconds, default 60
+}
+
 type ExecTool struct {
 	workingDir          string
 	timeout             time.Duration
@@ -22,22 +29,62 @@ type ExecTool struct {
 }
 
 func NewExecTool(workingDir string, restrict bool) *ExecTool {
+	return NewExecToolWithConfig(workingDir, restrict, ExecToolConfig{})
+}
+
+func NewExecToolWithConfig(workingDir string, restrict bool, cfg ExecToolConfig) *ExecTool {
+	// Built-in deny patterns (always active)
 	denyPatterns := []*regexp.Regexp{
+		// Destructive filesystem commands
 		regexp.MustCompile(`\brm\s+-[rf]{1,2}\b`),
 		regexp.MustCompile(`\bdel\s+/[fq]\b`),
 		regexp.MustCompile(`\brmdir\s+/s\b`),
-		regexp.MustCompile(`\b(format|mkfs|diskpart)\b\s`), // Match disk wiping commands (must be followed by space/args)
+		regexp.MustCompile(`\b(format|mkfs|diskpart)\b\s`),
 		regexp.MustCompile(`\bdd\s+if=`),
-		regexp.MustCompile(`>\s*/dev/sd[a-z]\b`), // Block writes to disk devices (but allow /dev/null)
+		regexp.MustCompile(`>\s*/dev/sd[a-z]\b`),
+		// System control
 		regexp.MustCompile(`\b(shutdown|reboot|poweroff)\b`),
+		// Fork bomb
 		regexp.MustCompile(`:\(\)\s*\{.*\};\s*:`),
+		// Data exfiltration patterns
+		regexp.MustCompile(`\bcurl\b.*\s+(-d|--data|--data-raw|--data-binary|-F|--form|-T|--upload-file)\b`),
+		regexp.MustCompile(`\bwget\b.*\s+(--post-data|--post-file)\b`),
+		regexp.MustCompile(`\bnc\b\s+\S+\s+\d+`),
+		regexp.MustCompile(`\bncat\b\s+\S+\s+\d+`),
+		// Encoded command execution (base64 pipe to shell)
+		regexp.MustCompile(`base64\b.*\|\s*(sh|bash|zsh)\b`),
+		// Reverse shell patterns
+		regexp.MustCompile(`\b(bash|sh|zsh)\s+-i\s+[>&]`),
+		regexp.MustCompile(`/dev/tcp/`),
+	}
+
+	// Merge user-configured deny patterns
+	for _, p := range cfg.DenyPatterns {
+		re, err := regexp.Compile(p)
+		if err == nil {
+			denyPatterns = append(denyPatterns, re)
+		}
+	}
+
+	// Parse user-configured allow patterns
+	var allowPatterns []*regexp.Regexp
+	for _, p := range cfg.AllowPatterns {
+		re, err := regexp.Compile(p)
+		if err == nil {
+			allowPatterns = append(allowPatterns, re)
+		}
+	}
+
+	timeout := 60 * time.Second
+	if cfg.MaxTimeout > 0 {
+		timeout = time.Duration(cfg.MaxTimeout) * time.Second
 	}
 
 	return &ExecTool{
 		workingDir:          workingDir,
-		timeout:             60 * time.Second,
+		timeout:             timeout,
 		denyPatterns:        denyPatterns,
-		allowPatterns:       nil,
+		allowPatterns:       allowPatterns,
 		restrictToWorkspace: restrict,
 	}
 }
@@ -174,6 +221,22 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 	if t.restrictToWorkspace {
 		if strings.Contains(cmd, "..\\") || strings.Contains(cmd, "../") {
 			return "Command blocked by safety guard (path traversal detected)"
+		}
+
+		// Block access to sensitive system paths
+		sensitivePathPatterns := []*regexp.Regexp{
+			regexp.MustCompile(`\b/etc/`),
+			regexp.MustCompile(`\b/var/`),
+			regexp.MustCompile(`\b/root\b`),
+			regexp.MustCompile(`\b/home/`),
+			regexp.MustCompile(`\b/proc/`),
+			regexp.MustCompile(`\b/sys/`),
+			regexp.MustCompile(`\b/boot/`),
+		}
+		for _, pattern := range sensitivePathPatterns {
+			if pattern.MatchString(lower) {
+				return "Command blocked by safety guard (access to sensitive path)"
+			}
 		}
 
 		cwdPath, err := filepath.Abs(cwd)

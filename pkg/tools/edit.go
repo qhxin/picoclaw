@@ -72,9 +72,16 @@ func (t *EditFileTool) Execute(ctx context.Context, args map[string]interface{})
 		return ErrorResult(err.Error())
 	}
 
-	if _, err := os.Stat(resolvedPath); os.IsNotExist(err) {
+	info, err := os.Stat(resolvedPath)
+	if os.IsNotExist(err) {
 		return ErrorResult(fmt.Sprintf("file not found: %s", path))
 	}
+	if err != nil {
+		return ErrorResult(fmt.Sprintf("failed to stat file: %v", err))
+	}
+
+	// Preserve original file permissions
+	perm := info.Mode().Perm()
 
 	content, err := os.ReadFile(resolvedPath)
 	if err != nil {
@@ -94,7 +101,7 @@ func (t *EditFileTool) Execute(ctx context.Context, args map[string]interface{})
 
 	newContent := strings.Replace(contentStr, oldText, newText, 1)
 
-	if err := os.WriteFile(resolvedPath, []byte(newContent), 0644); err != nil {
+	if err := os.WriteFile(resolvedPath, []byte(newContent), perm); err != nil {
 		return ErrorResult(fmt.Sprintf("failed to write file: %v", err))
 	}
 

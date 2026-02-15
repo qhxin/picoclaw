@@ -121,6 +121,8 @@ make install
 
 Docker Compose を使えば、ローカルにインストールせずに PicoClaw を実行できます。
 
+> **セキュリティ**: Docker イメージはデフォルトで非 root ユーザー（`picoclaw`, UID 1000）として実行されます。リソース制限（CPU: 1.0, メモリ: 512MB）は `docker-compose.yml` で設定されています。
+
 ```bash
 # 1. リポジトリをクローン
 git clone https://github.com/sipeed/picoclaw.git
@@ -485,16 +487,101 @@ PicoClaw はデフォルトでサンドボックス環境で実行されます�
 | `append_file` | ファイル追記 | ワークスペース内のファイルのみ |
 | `exec` | コマンド実行 | コマンドパスはワークスペース内である必要あり |
 
-#### exec ツールの追加保護
+<details>
+<summary><b>Exec 設定</b></summary>
 
-`restrict_to_workspace: false` でも、`exec` ツールは以下の危険なコマンドをブロックします：
+設定で `exec` ツールのセキュリティ動作をカスタマイズできます：
 
-- `rm -rf`, `del /f`, `rmdir /s` — 一括削除
-- `format`, `mkfs`, `diskpart` — ディスクフォーマット
-- `dd if=` — ディスクイメージング
-- `/dev/sd[a-z]` への書き込み — 直接ディスク書き込み
-- `shutdown`, `reboot`, `poweroff` — システムシャットダウン
-- フォークボム `:(){ :|:& };:`
+```json
+{
+  "tools": {
+    "exec": {
+      "deny_patterns": [],
+      "allow_patterns": [],
+      "max_timeout": 60
+    }
+  }
+}
+```
+
+| オプション | デフォルト | 説明 |
+|-----------|-----------|------|
+| `deny_patterns` | `[]` | ブロックする追加の正規表現パターン（組み込みルールとマージ） |
+| `allow_patterns` | `[]` | 設定時、マッチするコマンド**のみ**許可（ホワイトリストモード） |
+| `max_timeout` | `60` | コマンド実行の最大タイムアウト（秒） |
+
+**`deny_patterns` の例** — `pip install` とすべての `docker` コマンドをブロック：
+
+```json
+{
+  "tools": {
+    "exec": {
+      "deny_patterns": [
+        "\\bpip\\s+install\\b",
+        "\\bdocker\\b"
+      ]
+    }
+  }
+}
+```
+
+**`allow_patterns` の例** — `git`、`ls`、`cat`、`echo` コマンドのみ許可：
+
+```json
+{
+  "tools": {
+    "exec": {
+      "allow_patterns": [
+        "^git\\b",
+        "^ls\\b",
+        "^cat\\b",
+        "^echo\\b"
+      ]
+    }
+  }
+}
+```
+
+> **注意**: `deny_patterns` は組み込みルールとマージされます（両方が適用）。`allow_patterns` はホワイトリストとして機能します — 設定時、許可パターンにマッチしないコマンドは deny ルールに関係なくブロックされます。
+
+</details>
+
+#### 組み込み Exec 保護ルール
+
+`restrict_to_workspace: false` でも、`exec` ツールには**常に有効**な組み込み拒否ルールがあり、設定で上書きすることはできません：
+
+| カテゴリ | ブロックパターン | 説明 |
+|---------|----------------|------|
+| 破壊的 | `rm -rf`, `del /f`, `rmdir /s` | 一括削除 |
+| 破壊的 | `format`, `mkfs`, `diskpart` | ディスクフォーマット |
+| 破壊的 | `dd if=` | ディスクイメージング |
+| 破壊的 | `> /dev/sd[a-z]` | 直接ディスク書き込み |
+| システム | `shutdown`, `reboot`, `poweroff` | システム制御 |
+| システム | `:(){ :\|:& };:` | フォークボム |
+| データ漏洩 | `curl -d/--data/-F/--upload-file` | HTTP データアップロード |
+| データ漏洩 | `wget --post-data/--post-file` | HTTP POST アップロード |
+| データ漏洩 | `nc <host> <port>`, `ncat` | Netcat 接続 |
+| コード注入 | `base64 ... \| sh/bash/zsh` | エンコードされたコマンド実行 |
+| リバースシェル | `bash -i >&`, `/dev/tcp/` | リバースシェルパターン |
+
+`restrict_to_workspace: true` の場合、追加の制限が適用されます：
+
+- 機密システムパス（`/etc/`, `/var/`, `/root`, `/home/`, `/proc/`, `/sys/`, `/boot/`）へのアクセスがブロックされます
+- シンボリックリンクベースのパストラバーサル攻撃が検出・ブロックされます
+- `../` によるパストラバーサルがブロックされます
+
+> 組み込み正規表現パターンの完全なリストは [`pkg/tools/shell.go`](pkg/tools/shell.go#L37-L59) を参照してください。
+
+#### SSRF 保護
+
+すべてのアウトバウンド HTTP リクエスト（`web_fetch` ツールおよびチャットチャネルからのファイルダウンロード）は SSRF 攻撃に対して検証されます：
+
+- プライベート IP 範囲（`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`）がブロックされます
+- ループバックアドレス（`127.0.0.0/8`, `::1`）がブロックされます
+- リンクローカルアドレス（`169.254.0.0/16`）がブロックされます
+- クラウドメタデータエンドポイント（`169.254.169.254`）がブロックされます
+- `http://` と `https://` スキームのみ許可されます
+- リダイレクト先も検証され、リダイレクトベースの SSRF を防止します
 
 #### エラー例
 
@@ -539,8 +626,9 @@ export PICOCLAW_AGENTS_DEFAULTS_RESTRICT_TO_WORKSPACE=false
 | メインエージェント | `restrict_to_workspace` ✅ |
 | サブエージェント / Spawn | 同じ制限を継承 ✅ |
 | ハートビートタスク | 同じ制限を継承 ✅ |
+| Cron スケジュールジョブ | 同じ制限を継承 ✅ |
 
-すべてのパスで同じワークスペース制限が適用されます — サブエージェントやスケジュールタスクを通じてセキュリティ境界をバイパスする方法はありません。
+すべてのパスで同じワークスペース制限が適用されます — サブエージェント、Cron ジョブ、またはスケジュールタスクを通じてセキュリティ境界をバイパスする方法はありません。
 
 ### ハートビート（定期タスク）
 
@@ -697,6 +785,11 @@ HEARTBEAT_OK 応答         ユーザーが直接結果を受け取る
       "search": {
         "apiKey": "BSA..."
       }
+    },
+    "exec": {
+      "deny_patterns": [],
+      "allow_patterns": [],
+      "max_timeout": 60
     }
   },
   "heartbeat": {

@@ -22,8 +22,15 @@ FROM alpine:3.23
 
 RUN apk add --no-cache ca-certificates tzdata curl
 
+# Create non-root user for security
+RUN addgroup -g 1000 picoclaw && \
+    adduser -D -u 1000 -G picoclaw picoclaw
+
 # Copy binary
 COPY --from=builder /src/build/picoclaw /usr/local/bin/picoclaw
+
+# Switch to non-root user
+USER picoclaw
 
 # Create picoclaw home directory
 RUN /usr/local/bin/picoclaw onboard

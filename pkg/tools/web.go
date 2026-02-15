@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 const (
@@ -266,7 +268,8 @@ func (t *WebSearchTool) Execute(ctx context.Context, args map[string]interface{}
 }
 
 type WebFetchTool struct {
-	maxChars int
+	maxChars      int
+	skipSSRFCheck bool // for testing only
 }
 
 func NewWebFetchTool(maxChars int) *WebFetchTool {
@@ -310,13 +313,16 @@ func (t *WebFetchTool) Execute(ctx context.Context, args map[string]interface{})
 		return ErrorResult("url is required")
 	}
 
+	// Validate URL against SSRF attacks (blocks private IPs, localhost, metadata endpoints)
+	if !t.skipSSRFCheck {
+		if err := utils.ValidateURL(urlStr); err != nil {
+			return ErrorResult(fmt.Sprintf("URL blocked: %v", err))
+		}
+	}
+
 	parsedURL, err := url.Parse(urlStr)
 	if err != nil {
 		return ErrorResult(fmt.Sprintf("invalid URL: %v", err))
-	}
-
-	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
-		return ErrorResult("only http/https URLs are allowed")
 	}
 
 	if parsedURL.Host == "" {
@@ -348,6 +354,10 @@ func (t *WebFetchTool) Execute(ctx context.Context, args map[string]interface{})
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 5 {
 				return fmt.Errorf("stopped after 5 redirects")
+			}
+			// Validate redirect target against SSRF
+			if err := utils.ValidateURL(req.URL.String()); err != nil {
+				return fmt.Errorf("redirect blocked: %w", err)
 			}
 			return nil
 		},

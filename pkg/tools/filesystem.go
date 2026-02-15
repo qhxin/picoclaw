@@ -9,6 +9,8 @@ import (
 )
 
 // validatePath ensures the given path is within the workspace if restrict is true.
+// It resolves symlinks to prevent symlink-based path traversal attacks and uses
+// a trailing separator comparison to avoid prefix collisions (e.g. /workspace vs /workspace2).
 func validatePath(path, workspace string, restrict bool) (string, error) {
 	if workspace == "" {
 		return path, nil
@@ -29,8 +31,32 @@ func validatePath(path, workspace string, restrict bool) (string, error) {
 		}
 	}
 
-	if restrict && !strings.HasPrefix(absPath, absWorkspace) {
-		return "", fmt.Errorf("access denied: path is outside the workspace")
+	if restrict {
+		// Resolve symlinks for the workspace path
+		realWorkspace := absWorkspace
+		if resolved, err := filepath.EvalSymlinks(absWorkspace); err == nil {
+			realWorkspace = resolved
+		}
+		// Ensure workspace path ends with separator for safe prefix comparison
+		workspacePrefix := filepath.Clean(realWorkspace) + string(filepath.Separator)
+
+		// Resolve symlinks for the target path.
+		// For non-existent files, resolve the parent directory's symlinks and append the filename.
+		realPath := absPath
+		if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
+			realPath = resolved
+		} else if resolved, err := filepath.EvalSymlinks(filepath.Dir(absPath)); err == nil {
+			realPath = filepath.Join(resolved, filepath.Base(absPath))
+		}
+
+		// Check: realPath must be the workspace itself or inside it
+		if realPath != filepath.Clean(realWorkspace) &&
+			!strings.HasPrefix(realPath+string(filepath.Separator), workspacePrefix) &&
+			!strings.HasPrefix(realPath, workspacePrefix) {
+			return "", fmt.Errorf("access denied: path is outside the workspace")
+		}
+
+		absPath = realPath
 	}
 
 	return absPath, nil
@@ -140,7 +166,7 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]interface{}
 		return ErrorResult(fmt.Sprintf("failed to create directory: %v", err))
 	}
 
-	if err := os.WriteFile(resolvedPath, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(resolvedPath, []byte(content), 0600); err != nil {
 		return ErrorResult(fmt.Sprintf("failed to write file: %v", err))
 	}
 

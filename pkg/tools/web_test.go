@@ -9,6 +9,13 @@ import (
 	"testing"
 )
 
+// newTestWebFetchTool creates a WebFetchTool with SSRF check disabled for local test servers.
+func newTestWebFetchTool(maxChars int) *WebFetchTool {
+	tool := NewWebFetchTool(maxChars)
+	tool.skipSSRFCheck = true
+	return tool
+}
+
 // TestWebTool_WebFetch_Success verifies successful URL fetching
 func TestWebTool_WebFetch_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -18,7 +25,7 @@ func TestWebTool_WebFetch_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tool := NewWebFetchTool(50000)
+	tool := newTestWebFetchTool(50000)
 	ctx := context.Background()
 	args := map[string]interface{}{
 		"url": server.URL,
@@ -54,7 +61,7 @@ func TestWebTool_WebFetch_JSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tool := NewWebFetchTool(50000)
+	tool := newTestWebFetchTool(50000)
 	ctx := context.Background()
 	args := map[string]interface{}{
 		"url": server.URL,
@@ -145,7 +152,7 @@ func TestWebTool_WebFetch_Truncation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tool := NewWebFetchTool(1000) // Limit to 1000 chars
+	tool := newTestWebFetchTool(1000) // Limit to 1000 chars
 	ctx := context.Background()
 	args := map[string]interface{}{
 		"url": server.URL,
@@ -206,7 +213,7 @@ func TestWebTool_WebFetch_HTMLExtraction(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tool := NewWebFetchTool(50000)
+	tool := newTestWebFetchTool(50000)
 	ctx := context.Background()
 	args := map[string]interface{}{
 		"url": server.URL,
@@ -230,6 +237,30 @@ func TestWebTool_WebFetch_HTMLExtraction(t *testing.T) {
 	}
 }
 
+// TestWebTool_WebFetch_SSRFBlocked verifies that SSRF attempts are blocked
+func TestWebTool_WebFetch_SSRFBlocked(t *testing.T) {
+	tool := NewWebFetchTool(50000) // Note: NOT using newTestWebFetchTool, SSRF check is active
+	ctx := context.Background()
+
+	ssrfURLs := []string{
+		"http://127.0.0.1/admin",
+		"http://localhost/secret",
+		"http://169.254.169.254/latest/meta-data/",
+		"http://10.0.0.1/internal",
+		"http://192.168.1.1/router",
+	}
+
+	for _, u := range ssrfURLs {
+		result := tool.Execute(ctx, map[string]interface{}{"url": u})
+		if !result.IsError {
+			t.Errorf("Expected SSRF block for %s, but got success", u)
+		}
+		if !strings.Contains(result.ForLLM, "blocked") {
+			t.Errorf("Expected 'blocked' in error for %s, got: %s", u, result.ForLLM)
+		}
+	}
+}
+
 // TestWebTool_WebFetch_MissingDomain verifies error handling for URL without domain
 func TestWebTool_WebFetch_MissingDomain(t *testing.T) {
 	tool := NewWebFetchTool(50000)
@@ -245,8 +276,9 @@ func TestWebTool_WebFetch_MissingDomain(t *testing.T) {
 		t.Errorf("Expected error for URL without domain")
 	}
 
-	// Should mention missing domain
-	if !strings.Contains(result.ForLLM, "domain") && !strings.Contains(result.ForUser, "domain") {
-		t.Errorf("Expected domain error message, got ForLLM: %s", result.ForLLM)
+	// Should mention missing domain or host
+	if !strings.Contains(result.ForLLM, "domain") && !strings.Contains(result.ForLLM, "host") &&
+		!strings.Contains(result.ForUser, "domain") && !strings.Contains(result.ForUser, "host") {
+		t.Errorf("Expected domain/host error message, got ForLLM: %s", result.ForLLM)
 	}
 }

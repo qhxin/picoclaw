@@ -115,6 +115,11 @@
         "api_key": "YOUR_BRAVE_API_KEY",
         "max_results": 5
       }
+    },
+    "exec": {
+      "deny_patterns": [],
+      "allow_patterns": [],
+      "max_timeout": 60
     }
   },
   "heartbeat": {

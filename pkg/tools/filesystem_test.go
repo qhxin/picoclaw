@@ -247,3 +247,55 @@ func TestFilesystemTool_ListDir_DefaultPath(t *testing.T) {
 		t.Errorf("Expected success with default path '.', got IsError=true: %s", result.ForLLM)
 	}
 }
+
+// TestValidatePath_SymlinkEscape verifies that symlinks pointing outside workspace are blocked
+func TestValidatePath_SymlinkEscape(t *testing.T) {
+	// Create workspace and an outside directory
+	workspace := t.TempDir()
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "secret.txt")
+	os.WriteFile(outsideFile, []byte("secret"), 0644)
+
+	// Create a symlink inside workspace pointing outside
+	symlinkPath := filepath.Join(workspace, "escape")
+	if err := os.Symlink(outsideDir, symlinkPath); err != nil {
+		t.Skipf("Cannot create symlink: %v", err)
+	}
+
+	// Try to access the symlinked file with restrict=true
+	_, err := validatePath("escape/secret.txt", workspace, true)
+	if err == nil {
+		t.Error("Expected symlink escape to be blocked, but it was allowed")
+	}
+}
+
+// TestValidatePath_PrefixCollision verifies that /workspace2 is not confused with /workspace
+func TestValidatePath_PrefixCollision(t *testing.T) {
+	baseDir := t.TempDir()
+	workspace := filepath.Join(baseDir, "workspace")
+	otherDir := filepath.Join(baseDir, "workspace2")
+	os.MkdirAll(workspace, 0755)
+	os.MkdirAll(otherDir, 0755)
+
+	// Try to access workspace2 when restricted to workspace
+	_, err := validatePath(otherDir, workspace, true)
+	if err == nil {
+		t.Error("Expected prefix collision path to be blocked, but it was allowed")
+	}
+}
+
+// TestValidatePath_AllowsWorkspaceItself verifies accessing the workspace root is allowed
+func TestValidatePath_AllowsWorkspaceItself(t *testing.T) {
+	workspace := t.TempDir()
+
+	path, err := validatePath(".", workspace, true)
+	if err != nil {
+		t.Errorf("Expected workspace root access to be allowed, got error: %v", err)
+	}
+
+	// Resolve both to compare
+	expectedPath, _ := filepath.EvalSymlinks(workspace)
+	if path != expectedPath {
+		t.Errorf("Expected path to be %s, got %s", expectedPath, path)
+	}
+}

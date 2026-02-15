@@ -139,6 +139,8 @@ make install
 
 您也可以使用 Docker Compose 运行 PicoClaw，无需在本地安装任何环境。
 
+> **安全**: Docker 镜像默认以非 root 用户（`picoclaw`, UID 1000）运行。资源限制（CPU: 1.0, 内存: 512MB）已在 `docker-compose.yml` 中配置。
+
 ```bash
 # 1. 克隆仓库
 git clone https://github.com/sipeed/picoclaw.git
@@ -438,6 +440,174 @@ PicoClaw 将数据存储在您配置的工作区中（默认：`~/.picoclaw/work
 
 ```
 
+### 🔒 安全沙盒 (Security Sandbox)
+
+PicoClaw 默认在沙盒环境中运行。Agent 只能访问配置的工作区内的文件，并在工作区内执行命令。
+
+#### 默认配置
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "workspace": "~/.picoclaw/workspace",
+      "restrict_to_workspace": true
+    }
+  }
+}
+```
+
+| 选项 | 默认值 | 描述 |
+|------|--------|------|
+| `workspace` | `~/.picoclaw/workspace` | Agent 的工作目录 |
+| `restrict_to_workspace` | `true` | 将文件/命令访问限制在工作区内 |
+
+<details>
+<summary><b>Exec 命令配置</b></summary>
+
+可以通过配置自定义 `exec` 工具的安全行为：
+
+```json
+{
+  "tools": {
+    "exec": {
+      "deny_patterns": [],
+      "allow_patterns": [],
+      "max_timeout": 60
+    }
+  }
+}
+```
+
+| 选项 | 默认值 | 描述 |
+|------|--------|------|
+| `deny_patterns` | `[]` | 额外的正则拦截模式（与内置规则合并） |
+| `allow_patterns` | `[]` | 若设置，**仅允许**匹配的命令（白名单模式） |
+| `max_timeout` | `60` | 命令执行最大超时时间（秒） |
+
+**`deny_patterns` 示例** — 拦截 `pip install` 和所有 `docker` 命令：
+
+```json
+{
+  "tools": {
+    "exec": {
+      "deny_patterns": [
+        "\\bpip\\s+install\\b",
+        "\\bdocker\\b"
+      ]
+    }
+  }
+}
+```
+
+**`allow_patterns` 示例** — 仅允许 `git`、`ls`、`cat`、`echo` 命令：
+
+```json
+{
+  "tools": {
+    "exec": {
+      "allow_patterns": [
+        "^git\\b",
+        "^ls\\b",
+        "^cat\\b",
+        "^echo\\b"
+      ]
+    }
+  }
+}
+```
+
+> **说明**：`deny_patterns` 与内置规则合并（两者同时生效）。`allow_patterns` 作为白名单 — 设置后，不匹配任何允许模式的命令将被拦截（无论 deny 规则如何）。
+
+</details>
+
+#### 受保护的工具
+
+当 `restrict_to_workspace: true` 时，以下工具被沙盒化：
+
+| 工具 | 功能 | 限制 |
+|------|------|------|
+| `read_file` | 读取文件 | 仅限工作区内 |
+| `write_file` | 写入文件 | 仅限工作区内 |
+| `list_dir` | 列出目录 | 仅限工作区内 |
+| `edit_file` | 编辑文件 | 仅限工作区内 |
+| `append_file` | 追加文件 | 仅限工作区内 |
+| `exec` | 执行命令 | 命令路径须在工作区内 |
+
+#### 内置 Exec 防护规则
+
+即使 `restrict_to_workspace: false`，`exec` 工具拥有**始终生效**的内置拦截规则，不可通过配置覆盖：
+
+| 类别 | 拦截模式 | 说明 |
+|------|---------|------|
+| 破坏性 | `rm -rf`, `del /f`, `rmdir /s` | 批量删除 |
+| 破坏性 | `format`, `mkfs`, `diskpart` | 磁盘格式化 |
+| 破坏性 | `dd if=` | 磁盘镜像 |
+| 破坏性 | `> /dev/sd[a-z]` | 直接磁盘写入 |
+| 系统控制 | `shutdown`, `reboot`, `poweroff` | 系统关机/重启 |
+| 系统控制 | `:(){ :\|:& };:` | Fork 炸弹 |
+| 数据外泄 | `curl -d/--data/-F/--upload-file` | HTTP 数据上传 |
+| 数据外泄 | `wget --post-data/--post-file` | HTTP POST 上传 |
+| 数据外泄 | `nc <host> <port>`, `ncat` | Netcat 连接 |
+| 代码注入 | `base64 ... \| sh/bash/zsh` | 编码命令执行 |
+| 反向 Shell | `bash -i >&`, `/dev/tcp/` | 反向 Shell 模式 |
+
+当 `restrict_to_workspace: true` 时，还有额外限制：
+
+* 访问敏感系统路径（`/etc/`, `/var/`, `/root`, `/home/`, `/proc/`, `/sys/`, `/boot/`）被拦截
+* 基于符号链接的路径遍历攻击会被检测并拦截
+* 通过 `../` 的路径遍历被拦截
+
+> 完整的内置正则规则列表请查看 [`pkg/tools/shell.go`](pkg/tools/shell.go#L37-L59)。
+
+#### SSRF 防护
+
+所有出站 HTTP 请求（通过 `web_fetch` 工具和聊天渠道的文件下载）均会进行 SSRF 攻击验证：
+
+* 私有 IP 段（`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`）被拦截
+* 回环地址（`127.0.0.0/8`, `::1`）被拦截
+* 链路本地地址（`169.254.0.0/16`）被拦截
+* 云元数据端点（`169.254.169.254`）被拦截
+* 仅允许 `http://` 和 `https://` 协议
+* 重定向目标同样会被验证，防止重定向型 SSRF
+
+#### 禁用限制（安全风险）
+
+如需 Agent 访问工作区外的路径：
+
+**方法 1：配置文件**
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "restrict_to_workspace": false
+    }
+  }
+}
+```
+
+**方法 2：环境变量**
+
+```bash
+export PICOCLAW_AGENTS_DEFAULTS_RESTRICT_TO_WORKSPACE=false
+```
+
+> ⚠️ **警告**：禁用此限制将允许 Agent 访问系统上任意路径。请仅在受控环境中谨慎使用。
+
+#### 安全边界一致性
+
+`restrict_to_workspace` 设置在所有执行路径中一致适用：
+
+| 执行路径 | 安全边界 |
+|---------|---------|
+| 主 Agent | `restrict_to_workspace` ✅ |
+| 子 Agent / Spawn | 继承相同限制 ✅ |
+| 心跳任务 | 继承相同限制 ✅ |
+| Cron 定时任务 | 继承相同限制 ✅ |
+
+所有路径共享相同的工作区限制 — 无法通过子 Agent、Cron 定时任务或其他调度方式绕过安全边界。
+
 ### 心跳 / 周期性任务 (Heartbeat)
 
 PicoClaw 可以自动执行周期性任务。在工作区创建 `HEARTBEAT.md` 文件：
@@ -625,6 +795,11 @@ picoclaw agent -m "你好"
       "search": {
         "api_key": "BSA..."
       }
+    },
+    "exec": {
+      "deny_patterns": [],
+      "allow_patterns": [],
+      "max_timeout": 60
     }
   },
   "heartbeat": {
