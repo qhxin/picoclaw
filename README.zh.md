@@ -536,7 +536,7 @@ PicoClaw 默认在沙盒环境中运行。Agent 只能访问配置的工作区�
 
 #### 内置 Exec 防护规则
 
-即使 `restrict_to_workspace: false`，`exec` 工具拥有**始终生效**的内置拦截规则，不可通过配置覆盖：
+当 `security.exec_guard` 设为 `"block"` 或 `"approve"` 时，`exec` 工具拥有不可通过配置覆盖的内置拦截规则：
 
 | 类别 | 拦截模式 | 说明 |
 |------|---------|------|
@@ -562,7 +562,7 @@ PicoClaw 默认在沙盒环境中运行。Agent 只能访问配置的工作区�
 
 #### SSRF 防护
 
-所有出站 HTTP 请求（通过 `web_fetch` 工具和聊天渠道的文件下载）均会进行 SSRF 攻击验证：
+当 `security.ssrf_protection` 设为 `"block"` 或 `"approve"` 时，所有出站 HTTP 请求（通过 `web_fetch` 工具和文件下载）均会进行 SSRF 攻击验证：
 
 * 私有 IP 段（`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`）被拦截
 * 回环地址（`127.0.0.0/8`, `::1`）被拦截
@@ -607,6 +607,65 @@ export PICOCLAW_AGENTS_DEFAULTS_RESTRICT_TO_WORKSPACE=false
 | Cron 定时任务 | 继承相同限制 ✅ |
 
 所有路径共享相同的工作区限制 — 无法通过子 Agent、Cron 定时任务或其他调度方式绕过安全边界。
+
+#### 安全策略模式
+
+所有安全检查（命令防护、SSRF 防护、路径验证、技能验证）均支持三种可配置模式。默认所有模式均为 `"off"` — 安全功能为**可选启用**，未明确配置时不会改变任何行为。
+
+| 模式 | 行为 |
+|------|------|
+| `off` | 安全检查禁用（默认）。不进行任何拦截。 |
+| `block` | 检测到违规时立即拒绝并返回错误。 |
+| `approve` | 检测到违规时暂停执行，通过 IM 向用户发送审批请求，等待用户回复。 |
+
+<details>
+<summary><b>安全配置</b></summary>
+
+```json
+{
+  "security": {
+    "exec_guard": "off",
+    "ssrf_protection": "off",
+    "path_validation": "off",
+    "skill_validation": "off",
+    "approval_timeout": 300
+  }
+}
+```
+
+| 选项 | 默认值 | 描述 |
+|------|--------|------|
+| `exec_guard` | `"off"` | 命令拦截/放行模式检查 |
+| `ssrf_protection` | `"off"` | 出站 URL 验证（私有 IP、元数据端点） |
+| `path_validation` | `"off"` | 增强的符号链接感知路径限制 |
+| `skill_validation` | `"off"` | 技能安装仓库格式检查 |
+| `approval_timeout` | `300` | 等待用户审批的超时时间（秒），超时自动拒绝 |
+
+也支持环境变量（如 `PICOCLAW_SECURITY_EXEC_GUARD=approve`）。
+
+</details>
+
+#### 基于 IM 的审批机制
+
+当安全检查设为 `"approve"` 模式时，PicoClaw 不会直接拒绝命令，而是：
+
+1. **暂停**工具执行
+2. **发送**审批请求到用户当前的 IM 渠道（Telegram、飞书、钉钉、Slack 等）
+3. **等待**用户回复批准或拒绝关键词
+4. 批准则**继续执行**，拒绝或超时则返回错误
+
+**支持的审批关键词：**
+
+| 操作 | 英文 | 中文 | 日文 |
+|------|------|------|------|
+| 批准 | approve, yes, allow, ok, y | 批准, 允许, 通过, 是 | 承認, 許可, はい |
+| 拒绝 | deny, no, reject, block, n | 拒绝, 否决, 不 | 拒否, いいえ |
+
+**说明：**
+- CLI 模式下，`"approve"` 模式会退化为 `"block"`，因为 CLI 没有异步 IM 渠道。
+- Cron 定时任务的审批请求会发送到最近活跃的 IM 渠道；若无可用渠道则退化为 `"block"`。
+- 审批等待期间，用户发送的非审批关键词消息会正常传递给 Agent。
+- 若在 `approval_timeout` 秒内未收到回复，请求将自动拒绝。
 
 ### 心跳 / 周期性任务 (Heartbeat)
 

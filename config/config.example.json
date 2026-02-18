@@ -122,6 +122,13 @@
       "max_timeout": 60
     }
   },
+  "security": {
+    "exec_guard": "off",
+    "ssrf_protection": "off",
+    "path_validation": "off",
+    "skill_validation": "off",
+    "approval_timeout": 300
+  },
   "heartbeat": {
     "enabled": true,
     "interval": 30

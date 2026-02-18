@@ -32,6 +32,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/migrate"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/security"
 	"github.com/sipeed/picoclaw/pkg/skills"
 	"github.com/sipeed/picoclaw/pkg/state"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -560,7 +561,7 @@ func gatewayCmd() {
 		})
 
 	// Setup cron tool and service
-	cronService := setupCronTool(agentLoop, msgBus, cfg.WorkspacePath(), cfg.Agents.Defaults.RestrictToWorkspace)
+	cronService := setupCronTool(agentLoop, msgBus, cfg.WorkspacePath(), cfg.Agents.Defaults.RestrictToWorkspace, cfg)
 
 	heartbeatService := heartbeat.NewHeartbeatService(
 		cfg.WorkspacePath(),
@@ -973,14 +974,23 @@ func getConfigPath() string {
 	return filepath.Join(home, ".picoclaw", "config.json")
 }
 
-func setupCronTool(agentLoop *agent.AgentLoop, msgBus *bus.MessageBus, workspace string, restrict bool) *cron.CronService {
+func setupCronTool(agentLoop *agent.AgentLoop, msgBus *bus.MessageBus, workspace string, restrict bool, cfg *config.Config) *cron.CronService {
 	cronStorePath := filepath.Join(workspace, "cron", "jobs.json")
 
 	// Create cron service
 	cronService := cron.NewCronService(cronStorePath, nil)
 
-	// Create and register CronTool (uses same workspace restriction as main agent)
-	cronTool := tools.NewCronTool(cronService, agentLoop, msgBus, workspace, restrict)
+	// Create PolicyEngine for cron exec tool
+	pe := security.NewPolicyEngine(&cfg.Security, msgBus)
+
+	// Create and register CronTool (uses same workspace restriction and security policy as main agent)
+	cronTool := tools.NewCronToolWithConfig(cronService, agentLoop, msgBus, workspace, restrict, tools.ExecToolConfig{
+		DenyPatterns:  cfg.Tools.Exec.DenyPatterns,
+		AllowPatterns: cfg.Tools.Exec.AllowPatterns,
+		MaxTimeout:    cfg.Tools.Exec.MaxTimeout,
+		PolicyEngine:  pe,
+		ExecGuardMode: pe.GetMode("exec_guard"),
+	})
 	agentLoop.RegisterTool(cronTool)
 
 	// Set the onJob handler

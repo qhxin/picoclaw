@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sipeed/picoclaw/pkg/security"
 )
 
 // TestFilesystemTool_ReadFile_Success verifies successful file reading
@@ -249,6 +251,7 @@ func TestFilesystemTool_ListDir_DefaultPath(t *testing.T) {
 }
 
 // TestValidatePath_SymlinkEscape verifies that symlinks pointing outside workspace are blocked
+// when path validation mode is "block" (enhanced symlink resolution).
 func TestValidatePath_SymlinkEscape(t *testing.T) {
 	// Create workspace and an outside directory
 	workspace := t.TempDir()
@@ -262,8 +265,8 @@ func TestValidatePath_SymlinkEscape(t *testing.T) {
 		t.Skipf("Cannot create symlink: %v", err)
 	}
 
-	// Try to access the symlinked file with restrict=true
-	_, err := validatePath("escape/secret.txt", workspace, true)
+	// Try to access the symlinked file with restrict=true and path validation enabled
+	_, err := validatePathWithMode("escape/secret.txt", workspace, true, security.ModeBlock, nil, "", "")
 	if err == nil {
 		t.Error("Expected symlink escape to be blocked, but it was allowed")
 	}
@@ -288,14 +291,86 @@ func TestValidatePath_PrefixCollision(t *testing.T) {
 func TestValidatePath_AllowsWorkspaceItself(t *testing.T) {
 	workspace := t.TempDir()
 
-	path, err := validatePath(".", workspace, true)
+	// With block mode (enhanced symlink resolution), path should be resolved
+	path, err := validatePathWithMode(".", workspace, true, security.ModeBlock, nil, "", "")
 	if err != nil {
 		t.Errorf("Expected workspace root access to be allowed, got error: %v", err)
 	}
 
-	// Resolve both to compare
 	expectedPath, _ := filepath.EvalSymlinks(workspace)
 	if path != expectedPath {
 		t.Errorf("Expected path to be %s, got %s", expectedPath, path)
+	}
+}
+
+func TestValidatePath_EmptyWorkspace(t *testing.T) {
+	path, err := validatePath("/some/path", "", true)
+	if err != nil {
+		t.Errorf("Expected no error with empty workspace, got: %v", err)
+	}
+	if path != "/some/path" {
+		t.Errorf("Expected path returned as-is, got: %s", path)
+	}
+}
+
+func TestValidatePath_ModeOff_NoSymlinkResolution(t *testing.T) {
+	workspace := t.TempDir()
+	testFile := filepath.Join(workspace, "file.txt")
+	os.WriteFile(testFile, []byte("data"), 0644)
+
+	path, err := validatePathWithMode("file.txt", workspace, true, security.ModeOff, nil, "", "")
+	if err != nil {
+		t.Errorf("Expected success, got: %v", err)
+	}
+	if path == "" {
+		t.Error("Expected non-empty path")
+	}
+}
+
+func TestReadFileTool_SetContext(t *testing.T) {
+	tool := NewReadFileToolWithPolicy("", false, PathPolicyOpts{})
+	tool.SetContext("telegram", "chat-1")
+	if tool.channel != "telegram" || tool.chatID != "chat-1" {
+		t.Errorf("SetContext failed: channel=%q, chatID=%q", tool.channel, tool.chatID)
+	}
+}
+
+func TestWriteFileTool_SetContext(t *testing.T) {
+	tool := NewWriteFileToolWithPolicy("", false, PathPolicyOpts{})
+	tool.SetContext("feishu", "chat-2")
+	if tool.channel != "feishu" || tool.chatID != "chat-2" {
+		t.Errorf("SetContext failed: channel=%q, chatID=%q", tool.channel, tool.chatID)
+	}
+}
+
+func TestListDirTool_SetContext(t *testing.T) {
+	tool := NewListDirToolWithPolicy("", false, PathPolicyOpts{})
+	tool.SetContext("dingtalk", "chat-3")
+	if tool.channel != "dingtalk" || tool.chatID != "chat-3" {
+		t.Errorf("SetContext failed: channel=%q, chatID=%q", tool.channel, tool.chatID)
+	}
+}
+
+func TestNewReadFileToolWithPolicy(t *testing.T) {
+	opts := PathPolicyOpts{PathMode: security.ModeBlock}
+	tool := NewReadFileToolWithPolicy("/workspace", true, opts)
+	if tool.workspace != "/workspace" || !tool.restrict || tool.pathMode != security.ModeBlock {
+		t.Error("WithPolicy constructor did not set fields correctly")
+	}
+}
+
+func TestNewWriteFileToolWithPolicy(t *testing.T) {
+	opts := PathPolicyOpts{PathMode: security.ModeApprove}
+	tool := NewWriteFileToolWithPolicy("/ws", true, opts)
+	if tool.workspace != "/ws" || !tool.restrict || tool.pathMode != security.ModeApprove {
+		t.Error("WithPolicy constructor did not set fields correctly")
+	}
+}
+
+func TestNewListDirToolWithPolicy(t *testing.T) {
+	opts := PathPolicyOpts{PathMode: security.ModeBlock}
+	tool := NewListDirToolWithPolicy("/ws", false, opts)
+	if tool.workspace != "/ws" || tool.restrict || tool.pathMode != security.ModeBlock {
+		t.Error("WithPolicy constructor did not set fields correctly")
 	}
 }

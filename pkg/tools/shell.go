@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/sipeed/picoclaw/pkg/security"
 )
 
 // ExecToolConfig holds configurable options for ExecTool.
@@ -18,6 +20,8 @@ type ExecToolConfig struct {
 	DenyPatterns  []string // Additional regex deny patterns from config
 	AllowPatterns []string // If set, only matching commands are allowed
 	MaxTimeout    int      // Seconds, default 60
+	PolicyEngine  *security.PolicyEngine
+	ExecGuardMode security.PolicyMode
 }
 
 type ExecTool struct {
@@ -26,6 +30,10 @@ type ExecTool struct {
 	denyPatterns        []*regexp.Regexp
 	allowPatterns       []*regexp.Regexp
 	restrictToWorkspace bool
+	policyEngine        *security.PolicyEngine
+	execGuardMode       security.PolicyMode
+	channel             string
+	chatID              string
 }
 
 func NewExecTool(workingDir string, restrict bool) *ExecTool {
@@ -86,7 +94,16 @@ func NewExecToolWithConfig(workingDir string, restrict bool, cfg ExecToolConfig)
 		denyPatterns:        denyPatterns,
 		allowPatterns:       allowPatterns,
 		restrictToWorkspace: restrict,
+		policyEngine:        cfg.PolicyEngine,
+		execGuardMode:       cfg.ExecGuardMode,
 	}
+}
+
+// SetContext implements ContextualTool so the ExecTool receives the current
+// IM channel and chatID for approval requests.
+func (t *ExecTool) SetContext(channel, chatID string) {
+	t.channel = channel
+	t.chatID = chatID
 }
 
 func (t *ExecTool) Name() string {
@@ -132,7 +149,7 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]interface{}) *To
 		}
 	}
 
-	if guardError := t.guardCommand(command, cwd); guardError != "" {
+	if guardError := t.guardCommand(ctx, command, cwd); guardError != "" {
 		return ErrorResult(guardError)
 	}
 
@@ -195,35 +212,47 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]interface{}) *To
 	}
 }
 
-func (t *ExecTool) guardCommand(command, cwd string) string {
+func (t *ExecTool) guardCommand(ctx context.Context, command, cwd string) string {
+	mode := t.execGuardMode
 	cmd := strings.TrimSpace(command)
 	lower := strings.ToLower(cmd)
 
-	for _, pattern := range t.denyPatterns {
-		if pattern.MatchString(lower) {
-			return "Command blocked by safety guard (dangerous pattern detected)"
-		}
-	}
-
-	if len(t.allowPatterns) > 0 {
-		allowed := false
-		for _, pattern := range t.allowPatterns {
+	// Deny-pattern check (mode-aware)
+	if !mode.IsOff() {
+		for _, pattern := range t.denyPatterns {
 			if pattern.MatchString(lower) {
-				allowed = true
-				break
+				reason := "dangerous pattern detected: " + pattern.String()
+				if err := t.evaluatePolicy(ctx, mode, command, reason, pattern.String()); err != nil {
+					return err.Error()
+				}
+				break // approved by user, continue
 			}
 		}
-		if !allowed {
-			return "Command blocked by safety guard (not in allowlist)"
+
+		// Allow-pattern check
+		if len(t.allowPatterns) > 0 {
+			allowed := false
+			for _, pattern := range t.allowPatterns {
+				if pattern.MatchString(lower) {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				reason := "command not in allowlist"
+				if err := t.evaluatePolicy(ctx, mode, command, reason, "allowlist"); err != nil {
+					return err.Error()
+				}
+			}
 		}
 	}
 
+	// Workspace restriction checks (always active when restrictToWorkspace is true)
 	if t.restrictToWorkspace {
 		if strings.Contains(cmd, "..\\") || strings.Contains(cmd, "../") {
 			return "Command blocked by safety guard (path traversal detected)"
 		}
 
-		// Block access to sensitive system paths
 		sensitivePathPatterns := []*regexp.Regexp{
 			regexp.MustCompile(`\b/etc/`),
 			regexp.MustCompile(`\b/var/`),
@@ -265,6 +294,23 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 	}
 
 	return ""
+}
+
+// evaluatePolicy delegates to the PolicyEngine when available.
+func (t *ExecTool) evaluatePolicy(ctx context.Context, mode security.PolicyMode, action, reason, ruleName string) error {
+	if t.policyEngine == nil {
+		if mode == security.ModeOff {
+			return nil
+		}
+		return fmt.Errorf("blocked by safety guard: %s", reason)
+	}
+	return t.policyEngine.Evaluate(ctx, mode, security.Violation{
+		Category: "exec_guard",
+		Tool:     "exec",
+		Action:   action,
+		Reason:   reason,
+		RuleName: ruleName,
+	}, t.channel, t.chatID)
 }
 
 func (t *ExecTool) SetTimeout(timeout time.Duration) {

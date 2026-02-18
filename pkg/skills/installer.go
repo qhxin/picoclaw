@@ -11,13 +11,17 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/sipeed/picoclaw/pkg/security"
 )
 
 // repoNamePattern validates GitHub repository format: "owner/repo"
 var repoNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$`)
 
 type SkillInstaller struct {
-	workspace string
+	workspace    string
+	policyEngine *security.PolicyEngine
+	skillMode    security.PolicyMode
 }
 
 type AvailableSkill struct {
@@ -40,10 +44,35 @@ func NewSkillInstaller(workspace string) *SkillInstaller {
 	}
 }
 
+// NewSkillInstallerWithPolicy creates a SkillInstaller with security policy support.
+func NewSkillInstallerWithPolicy(workspace string, pe *security.PolicyEngine, mode security.PolicyMode) *SkillInstaller {
+	return &SkillInstaller{
+		workspace:    workspace,
+		policyEngine: pe,
+		skillMode:    mode,
+	}
+}
+
 func (si *SkillInstaller) InstallFromGitHub(ctx context.Context, repo string) error {
-	// Validate repo format to prevent URL injection
-	if !repoNamePattern.MatchString(repo) {
-		return fmt.Errorf("invalid repository format: must be 'owner/repo' (got %q)", repo)
+	// Validate repo format to prevent URL injection (mode-aware)
+	if !si.skillMode.IsOff() {
+		if !repoNamePattern.MatchString(repo) {
+			reason := fmt.Sprintf("invalid repository format: must be 'owner/repo' (got %q)", repo)
+			if si.policyEngine != nil {
+				err := si.policyEngine.Evaluate(ctx, si.skillMode, security.Violation{
+					Category: "skill_validation",
+					Tool:     "skill_install",
+					Action:   repo,
+					Reason:   reason,
+				}, "", "")
+				if err != nil {
+					return err
+				}
+				// approved by user, continue
+			} else {
+				return fmt.Errorf("%s", reason)
+			}
+		}
 	}
 
 	skillDir := filepath.Join(si.workspace, "skills", filepath.Base(repo))

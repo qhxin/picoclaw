@@ -49,6 +49,7 @@ type Config struct {
 	Providers ProvidersConfig `json:"providers"`
 	Gateway   GatewayConfig   `json:"gateway"`
 	Tools     ToolsConfig     `json:"tools"`
+	Security  SecurityConfig  `json:"security"`
 	Heartbeat HeartbeatConfig `json:"heartbeat"`
 	Devices   DevicesConfig   `json:"devices"`
 	mu        sync.RWMutex
@@ -221,6 +222,17 @@ type ToolsConfig struct {
 	Exec ExecConfig     `json:"exec"`
 }
 
+// SecurityConfig controls optional security features.
+// All modes default to "off" to preserve pre-security-modification behavior.
+// Supported modes: "off" (disabled), "block" (reject), "approve" (IM-based approval).
+type SecurityConfig struct {
+	ExecGuard       string `json:"exec_guard" env:"PICOCLAW_SECURITY_EXEC_GUARD"`             // "off" | "block" | "approve"
+	SSRFProtection  string `json:"ssrf_protection" env:"PICOCLAW_SECURITY_SSRF_PROTECTION"`   // "off" | "block" | "approve"
+	PathValidation  string `json:"path_validation" env:"PICOCLAW_SECURITY_PATH_VALIDATION"`   // "off" | "block" | "approve"
+	SkillValidation string `json:"skill_validation" env:"PICOCLAW_SECURITY_SKILL_VALIDATION"` // "off" | "block" | "approve"
+	ApprovalTimeout int    `json:"approval_timeout" env:"PICOCLAW_SECURITY_APPROVAL_TIMEOUT"` // seconds, default 300
+}
+
 func DefaultConfig() *Config {
 	return &Config{
 		Agents: AgentsConfig{
@@ -333,6 +345,13 @@ func DefaultConfig() *Config {
 				AllowPatterns: []string{},
 				MaxTimeout:    60,
 			},
+		},
+		Security: SecurityConfig{
+			ExecGuard:       "off",
+			SSRFProtection:  "off",
+			PathValidation:  "off",
+			SkillValidation: "off",
+			ApprovalTimeout: 300,
 		},
 		Heartbeat: HeartbeatConfig{
 			Enabled:  true,

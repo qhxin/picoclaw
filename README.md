@@ -574,7 +574,7 @@ You can customize the `exec` tool's security behavior through configuration:
 
 #### Built-in Exec Protection
 
-Even with `restrict_to_workspace: false`, the `exec` tool has built-in deny rules that are **always active** and cannot be overridden by configuration:
+When `security.exec_guard` is set to `"block"` or `"approve"`, the `exec` tool has built-in deny rules that cannot be overridden by configuration:
 
 | Category | Blocked Pattern | Description |
 |----------|----------------|-------------|
@@ -600,7 +600,7 @@ When `restrict_to_workspace: true`, additional restrictions apply:
 
 #### SSRF Protection
 
-All outbound HTTP requests (via `web_fetch` tool and file downloads from chat channels) are validated against SSRF attacks:
+When `security.ssrf_protection` is set to `"block"` or `"approve"`, all outbound HTTP requests (via `web_fetch` tool and file downloads) are validated against SSRF attacks:
 
 * Private IP ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) are blocked
 * Loopback addresses (`127.0.0.0/8`, `::1`) are blocked
@@ -657,6 +657,65 @@ The `restrict_to_workspace` setting applies consistently across all execution pa
 | Cron scheduled jobs | Inherits same restriction ✅ |
 
 All paths share the same workspace restriction — there's no way to bypass the security boundary through subagents, cron jobs, or scheduled tasks.
+
+#### Security Policy Modes
+
+All security checks (exec guard, SSRF protection, path validation, skill validation) support three configurable modes. By default, all modes are set to `"off"` — security features are **opt-in** and do not change behavior unless explicitly configured.
+
+| Mode | Behavior |
+|------|----------|
+| `off` | Security check disabled (default). No enforcement. |
+| `block` | Violations are immediately rejected with an error. |
+| `approve` | Violations pause execution, send an approval request to the user via IM, and wait for a reply. |
+
+<details>
+<summary><b>Security Configuration</b></summary>
+
+```json
+{
+  "security": {
+    "exec_guard": "off",
+    "ssrf_protection": "off",
+    "path_validation": "off",
+    "skill_validation": "off",
+    "approval_timeout": 300
+  }
+}
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `exec_guard` | `"off"` | Mode for command deny/allow pattern checks |
+| `ssrf_protection` | `"off"` | Mode for outbound URL validation (private IP, metadata endpoints) |
+| `path_validation` | `"off"` | Mode for enhanced symlink-aware path restriction |
+| `skill_validation` | `"off"` | Mode for skill installation repository format checks |
+| `approval_timeout` | `300` | Seconds to wait for user approval before auto-deny |
+
+Environment variables are also supported (e.g. `PICOCLAW_SECURITY_EXEC_GUARD=approve`).
+
+</details>
+
+#### IM-based Approval
+
+When a security check is set to `"approve"` mode, instead of immediately rejecting the command, PicoClaw will:
+
+1. **Pause** the tool execution
+2. **Send** an approval request to the user via the current IM channel (Telegram, Feishu, DingTalk, Slack, etc.)
+3. **Wait** for the user to reply with an approval or denial keyword
+4. **Resume** execution if approved, or return an error if denied or timed out
+
+**Supported approval keywords:**
+
+| Action | English | Chinese | Japanese |
+|--------|---------|---------|----------|
+| Approve | approve, yes, allow, ok, y | 批准, 允许, 通过, 是 | 承認, 許可, はい |
+| Deny | deny, no, reject, block, n | 拒绝, 否决, 不 | 拒否, いいえ |
+
+**Notes:**
+- In CLI mode, `"approve"` falls back to `"block"` since there is no async IM channel.
+- For cron jobs, the approval request is sent to the last active IM channel; if none is available, it falls back to `"block"`.
+- Non-approval messages sent during an active approval request are passed through to the agent normally.
+- If no reply is received within `approval_timeout` seconds, the request is auto-denied.
 
 ### Heartbeat (Periodic Tasks)
 

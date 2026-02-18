@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/security"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
@@ -268,17 +269,39 @@ func (t *WebSearchTool) Execute(ctx context.Context, args map[string]interface{}
 }
 
 type WebFetchTool struct {
-	maxChars      int
-	skipSSRFCheck bool // for testing only
+	maxChars     int
+	ssrfMode     security.PolicyMode
+	policyEngine *security.PolicyEngine
+	channel      string
+	chatID       string
+}
+
+// WebFetchToolOptions configures optional security policy for WebFetchTool.
+type WebFetchToolOptions struct {
+	MaxChars     int
+	PolicyEngine *security.PolicyEngine
+	SSRFMode     security.PolicyMode
 }
 
 func NewWebFetchTool(maxChars int) *WebFetchTool {
-	if maxChars <= 0 {
-		maxChars = 50000
+	return NewWebFetchToolWithPolicy(WebFetchToolOptions{MaxChars: maxChars})
+}
+
+func NewWebFetchToolWithPolicy(opts WebFetchToolOptions) *WebFetchTool {
+	if opts.MaxChars <= 0 {
+		opts.MaxChars = 50000
 	}
 	return &WebFetchTool{
-		maxChars: maxChars,
+		maxChars:     opts.MaxChars,
+		policyEngine: opts.PolicyEngine,
+		ssrfMode:     opts.SSRFMode,
 	}
+}
+
+// SetContext implements ContextualTool for IM-based approval.
+func (t *WebFetchTool) SetContext(channel, chatID string) {
+	t.channel = channel
+	t.chatID = chatID
 }
 
 func (t *WebFetchTool) Name() string {
@@ -313,10 +336,23 @@ func (t *WebFetchTool) Execute(ctx context.Context, args map[string]interface{})
 		return ErrorResult("url is required")
 	}
 
-	// Validate URL against SSRF attacks (blocks private IPs, localhost, metadata endpoints)
-	if !t.skipSSRFCheck {
+	// SSRF protection (mode-aware)
+	if !t.ssrfMode.IsOff() {
 		if err := utils.ValidateURL(urlStr); err != nil {
-			return ErrorResult(fmt.Sprintf("URL blocked: %v", err))
+			if t.policyEngine != nil {
+				pErr := t.policyEngine.Evaluate(ctx, t.ssrfMode, security.Violation{
+					Category: "ssrf",
+					Tool:     "web_fetch",
+					Action:   urlStr,
+					Reason:   err.Error(),
+				}, t.channel, t.chatID)
+				if pErr != nil {
+					return ErrorResult(fmt.Sprintf("URL blocked: %v", pErr))
+				}
+				// approved by user
+			} else {
+				return ErrorResult(fmt.Sprintf("URL blocked: %v", err))
+			}
 		}
 	}
 
@@ -355,9 +391,10 @@ func (t *WebFetchTool) Execute(ctx context.Context, args map[string]interface{})
 			if len(via) >= 5 {
 				return fmt.Errorf("stopped after 5 redirects")
 			}
-			// Validate redirect target against SSRF
-			if err := utils.ValidateURL(req.URL.String()); err != nil {
-				return fmt.Errorf("redirect blocked: %w", err)
+			if !t.ssrfMode.IsOff() {
+				if err := utils.ValidateURL(req.URL.String()); err != nil {
+					return fmt.Errorf("redirect blocked: %w", err)
+				}
 			}
 			return nil
 		},

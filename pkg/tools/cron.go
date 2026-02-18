@@ -30,11 +30,16 @@ type CronTool struct {
 // NewCronTool creates a new CronTool.
 // The restrict parameter controls whether cron commands are restricted to the workspace.
 func NewCronTool(cronService *cron.CronService, executor JobExecutor, msgBus *bus.MessageBus, workspace string, restrict bool) *CronTool {
+	return NewCronToolWithConfig(cronService, executor, msgBus, workspace, restrict, ExecToolConfig{})
+}
+
+// NewCronToolWithConfig creates a CronTool with explicit ExecToolConfig (including PolicyEngine).
+func NewCronToolWithConfig(cronService *cron.CronService, executor JobExecutor, msgBus *bus.MessageBus, workspace string, restrict bool, execCfg ExecToolConfig) *CronTool {
 	return &CronTool{
 		cronService: cronService,
 		executor:    executor,
 		msgBus:      msgBus,
-		execTool:    NewExecTool(workspace, restrict),
+		execTool:    NewExecToolWithConfig(workspace, restrict, execCfg),
 	}
 }
 

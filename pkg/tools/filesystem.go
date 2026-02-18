@@ -6,12 +6,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sipeed/picoclaw/pkg/security"
 )
 
 // validatePath ensures the given path is within the workspace if restrict is true.
-// It resolves symlinks to prevent symlink-based path traversal attacks and uses
-// a trailing separator comparison to avoid prefix collisions (e.g. /workspace vs /workspace2).
+// When pathMode is "off", only basic prefix check is performed (no symlink resolution).
+// When pathMode is "block" or "approve", enhanced symlink resolution is used.
 func validatePath(path, workspace string, restrict bool) (string, error) {
+	return validatePathWithMode(path, workspace, restrict, security.ModeOff, nil, "", "")
+}
+
+// validatePathWithMode is the full-featured path validator with policy support.
+func validatePathWithMode(path, workspace string, restrict bool, pathMode security.PolicyMode, pe *security.PolicyEngine, channel, chatID string) (string, error) {
 	if workspace == "" {
 		return path, nil
 	}
@@ -32,28 +39,44 @@ func validatePath(path, workspace string, restrict bool) (string, error) {
 	}
 
 	if restrict {
-		// Resolve symlinks for the workspace path
+		useSymlinkResolution := !pathMode.IsOff()
+
 		realWorkspace := absWorkspace
-		if resolved, err := filepath.EvalSymlinks(absWorkspace); err == nil {
-			realWorkspace = resolved
+		if useSymlinkResolution {
+			if resolved, err := filepath.EvalSymlinks(absWorkspace); err == nil {
+				realWorkspace = resolved
+			}
 		}
-		// Ensure workspace path ends with separator for safe prefix comparison
 		workspacePrefix := filepath.Clean(realWorkspace) + string(filepath.Separator)
 
-		// Resolve symlinks for the target path.
-		// For non-existent files, resolve the parent directory's symlinks and append the filename.
 		realPath := absPath
-		if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
-			realPath = resolved
-		} else if resolved, err := filepath.EvalSymlinks(filepath.Dir(absPath)); err == nil {
-			realPath = filepath.Join(resolved, filepath.Base(absPath))
+		if useSymlinkResolution {
+			if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
+				realPath = resolved
+			} else if resolved, err := filepath.EvalSymlinks(filepath.Dir(absPath)); err == nil {
+				realPath = filepath.Join(resolved, filepath.Base(absPath))
+			}
 		}
 
-		// Check: realPath must be the workspace itself or inside it
 		if realPath != filepath.Clean(realWorkspace) &&
 			!strings.HasPrefix(realPath+string(filepath.Separator), workspacePrefix) &&
 			!strings.HasPrefix(realPath, workspacePrefix) {
-			return "", fmt.Errorf("access denied: path is outside the workspace")
+			violation := fmt.Errorf("access denied: path is outside the workspace")
+			if pe != nil && pathMode == security.ModeApprove {
+				ctx := context.Background()
+				pErr := pe.Evaluate(ctx, pathMode, security.Violation{
+					Category: "path_validation",
+					Tool:     "filesystem",
+					Action:   path,
+					Reason:   violation.Error(),
+				}, channel, chatID)
+				if pErr != nil {
+					return "", pErr
+				}
+				// approved
+			} else {
+				return "", violation
+			}
 		}
 
 		absPath = realPath
@@ -62,13 +85,32 @@ func validatePath(path, workspace string, restrict bool) (string, error) {
 	return absPath, nil
 }
 
+// PathPolicyOpts holds optional security policy settings for filesystem tools.
+type PathPolicyOpts struct {
+	PathMode     security.PolicyMode
+	PolicyEngine *security.PolicyEngine
+}
+
 type ReadFileTool struct {
-	workspace string
-	restrict  bool
+	workspace    string
+	restrict     bool
+	pathMode     security.PolicyMode
+	policyEngine *security.PolicyEngine
+	channel      string
+	chatID       string
 }
 
 func NewReadFileTool(workspace string, restrict bool) *ReadFileTool {
 	return &ReadFileTool{workspace: workspace, restrict: restrict}
+}
+
+func NewReadFileToolWithPolicy(workspace string, restrict bool, opts PathPolicyOpts) *ReadFileTool {
+	return &ReadFileTool{workspace: workspace, restrict: restrict, pathMode: opts.PathMode, policyEngine: opts.PolicyEngine}
+}
+
+func (t *ReadFileTool) SetContext(channel, chatID string) {
+	t.channel = channel
+	t.chatID = chatID
 }
 
 func (t *ReadFileTool) Name() string {
@@ -98,7 +140,7 @@ func (t *ReadFileTool) Execute(ctx context.Context, args map[string]interface{})
 		return ErrorResult("path is required")
 	}
 
-	resolvedPath, err := validatePath(path, t.workspace, t.restrict)
+	resolvedPath, err := validatePathWithMode(path, t.workspace, t.restrict, t.pathMode, t.policyEngine, t.channel, t.chatID)
 	if err != nil {
 		return ErrorResult(err.Error())
 	}
@@ -112,12 +154,25 @@ func (t *ReadFileTool) Execute(ctx context.Context, args map[string]interface{})
 }
 
 type WriteFileTool struct {
-	workspace string
-	restrict  bool
+	workspace    string
+	restrict     bool
+	pathMode     security.PolicyMode
+	policyEngine *security.PolicyEngine
+	channel      string
+	chatID       string
 }
 
 func NewWriteFileTool(workspace string, restrict bool) *WriteFileTool {
 	return &WriteFileTool{workspace: workspace, restrict: restrict}
+}
+
+func NewWriteFileToolWithPolicy(workspace string, restrict bool, opts PathPolicyOpts) *WriteFileTool {
+	return &WriteFileTool{workspace: workspace, restrict: restrict, pathMode: opts.PathMode, policyEngine: opts.PolicyEngine}
+}
+
+func (t *WriteFileTool) SetContext(channel, chatID string) {
+	t.channel = channel
+	t.chatID = chatID
 }
 
 func (t *WriteFileTool) Name() string {
@@ -156,7 +211,7 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]interface{}
 		return ErrorResult("content is required")
 	}
 
-	resolvedPath, err := validatePath(path, t.workspace, t.restrict)
+	resolvedPath, err := validatePathWithMode(path, t.workspace, t.restrict, t.pathMode, t.policyEngine, t.channel, t.chatID)
 	if err != nil {
 		return ErrorResult(err.Error())
 	}
@@ -174,12 +229,25 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]interface{}
 }
 
 type ListDirTool struct {
-	workspace string
-	restrict  bool
+	workspace    string
+	restrict     bool
+	pathMode     security.PolicyMode
+	policyEngine *security.PolicyEngine
+	channel      string
+	chatID       string
 }
 
 func NewListDirTool(workspace string, restrict bool) *ListDirTool {
 	return &ListDirTool{workspace: workspace, restrict: restrict}
+}
+
+func NewListDirToolWithPolicy(workspace string, restrict bool, opts PathPolicyOpts) *ListDirTool {
+	return &ListDirTool{workspace: workspace, restrict: restrict, pathMode: opts.PathMode, policyEngine: opts.PolicyEngine}
+}
+
+func (t *ListDirTool) SetContext(channel, chatID string) {
+	t.channel = channel
+	t.chatID = chatID
 }
 
 func (t *ListDirTool) Name() string {
@@ -209,7 +277,7 @@ func (t *ListDirTool) Execute(ctx context.Context, args map[string]interface{}) 
 		path = "."
 	}
 
-	resolvedPath, err := validatePath(path, t.workspace, t.restrict)
+	resolvedPath, err := validatePathWithMode(path, t.workspace, t.restrict, t.pathMode, t.policyEngine, t.channel, t.chatID)
 	if err != nil {
 		return ErrorResult(err.Error())
 	}
